@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE phrases SYSTEM "entities.dtd">
+
+<epp:phrases xmlns="http://www.w3.org/1999/xhtml" xmlns:epp="http://eprints.org/ep3/phrase" xmlns:epc="http://eprints.org/ep3/control">
+  <epp:phrase id="Plugin/Import/PubMedID:duplicate_warning_header">
+    <b>The metadata for the publication with PMID <epc:pin name="pmid"/> was not imported because the following duplicate(s) has/have been found:</b><br/>
+  </epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:duplicate_warning">
+    <b>EPrint <epc:pin name="eprintid"/> <epc:pin name="depositor"/> <epc:pin name="eprint_status"/>.<br/>
+    The publication is listed under the following collection(s):<br/><epc:pin name="collections"/><br/>
+    If your collection is missing, please contact: <a href="mailto:{$config{adminemail}}"><epc:print expr="$config{adminemail}"/></a>.</b> 
+  </epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:owned">owned by you currently</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:deposited">
+    deposited by <epc:pin name="name_honourific"/> <epc:pin name="name_given"/> <epc:pin name="name_family"/>
+  </epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:archive">in the live archive</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:inbox">in the user workspace</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:buffer">under review</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:invalid_pmid">Invalid PMID: <epc:pin name="pmid"/></epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:nomatch">No match: <epc:pin name="pmid"/></epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:nosubject">Collection(s) not yet assigned</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:unknown_user">deposited by an unknown user</epp:phrase>
+</epp:phrases>

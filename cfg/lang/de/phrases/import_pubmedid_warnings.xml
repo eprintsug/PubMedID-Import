@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE phrases SYSTEM "entities.dtd">
+
+<epp:phrases xmlns="http://www.w3.org/1999/xhtml" xmlns:epp="http://eprints.org/ep3/phrase" xmlns:epc="http://eprints.org/ep3/control">
+  <epp:phrase id="Plugin/Import/PubMedID:duplicate_warning_header">
+    <b>Die Publikation mit der PMID <epc:pin name="pmid"/> konnte nicht importiert werden, weil sie schon in ZORA erfasst wurde:</b><br/>
+  </epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:duplicate_warning"> 
+    <b>Die EPrint-ID lautet <epc:pin name="eprintid"/>. Die Publikation wurde von <epc:pin name="depositor"/> eingegeben und befindet sich im <epc:pin name="eprint_status"/>.<br/>
+      Sie ist bereits mit folgendem/n Institut(en) oder Klinik(en) verknüpft:<br/><epc:pin name="collections"/><br/>
+      Sollte Ihr Institut/Ihre Klinik fehlen, schreiben Sie bitte ein Mail an <a href="mailto:{$config{adminemail}}"><epc:print expr="$config{adminemail}"/></a>.</b> 
+  </epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:owned">Ihnen</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:deposited">
+    <epc:pin name="name_honourific"/> <epc:pin name="name_given"/> <epc:pin name="name_family"/>
+  </epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:archive">Live-Archiv</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:inbox">Arbeitsbereich</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:buffer">Review</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:invalid_pmid">Ungültige PMID: <epc:pin name="pmid"/></epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:nomatch">PMID <epc:pin name="pmid"/> nicht gefunden</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:nosubject">Noch keine zugewiesen</epp:phrase>
+  <epp:phrase id="Plugin/Import/PubMedID:unknown_user">einem unbekannten Benutzer</epp:phrase>
+</epp:phrases>
