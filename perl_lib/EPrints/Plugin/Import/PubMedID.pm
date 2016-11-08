@@ -212,7 +212,7 @@ sub input_fh
 		# my $url = URI->new( $plugin->{EFETCH_URL} );
 		# $url->query_form( $url->query_form, id => $pmid );
 		
-		my $xml = get_pubmed_data( $plugin, $pmid );
+		my $xml = $plugin->get_pubmed_data( $pmid );
 
 		# my $xml = EPrints::XML::parse_url( $url );
 		# END UZH CHANGE
@@ -260,6 +260,9 @@ sub get_pubmed_data
 	my $xml;
 	my $response;
 	
+	my $parser = XML::LibXML->new();
+	$parser->validation(0);
+	
 	my $host = $plugin->{session}->get_repository->config( 'host ');
 	my $request_retry = 3;
 	my $request_delay = 10;
@@ -267,7 +270,7 @@ sub get_pubmed_data
 	my $url = URI->new( $plugin->{EFETCH_URL} );
 	$url->query_form( $url->query_form, id => $pmid );
 	
-	my $req = HTTP::Request->new("GET",$url);
+	my $req = HTTP::Request->new( "GET", $url );
 	$req->header( "Accept" => "text/xml" );
 	$req->header( "Accept-Charset" => "utf-8" );
 	$req->header( "User-Agent" => "EPrints 3.3.x; " . $host  );
@@ -288,12 +291,15 @@ sub get_pubmed_data
 
 	if ( $response->code != 200 )
 	{
-		print STDERR "No response from ncbi.nlm.nih.gov for PubMed ID $pmid\n";
+		print STDERR "HTTP status " . $response->code .  " from ncbi.nlm.nih.gov for PubMed ID $pmid\n";
+	}
+	
+	if (!$success)
+	{	
+		$xml = $parser->parse_string( '<?xml version="1.0" ?><eFetchResult><ERROR>' . $response->code . '</ERROR></eFetchResult>' );
 	}
 	else
 	{
-		my $parser = XML::LibXML->new();
-		$parser->validation(0);
 		$xml = $parser->parse_string( $response->content );
 	}
 	
