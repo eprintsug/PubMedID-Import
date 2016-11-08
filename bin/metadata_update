@@ -1,0 +1,969 @@
+#!/usr/bin/perl -w -I/usr/local/eprints/perl_lib
+
+
+=pod
+
+=for Pod2Wiki
+
+=head1 NAME
+
+B<metadata_update> - EPrints crossef data update tool
+
+=head1 SYNOPSIS
+
+B<metadata_update> I<command> I<repository_id> I<user> [B<options>] 
+
+Where I<command> is one of:
+
+=over 4
+
+=item insert
+
+=item overwrite
+
+=item compare
+
+=item help
+
+=back
+
+and I<user> is the username of the user the report will be sent to (if --sendreport is specified)
+
+Type I<metadata_update help> for further help.
+
+=head1 ARGUMENTS
+
+=over 8
+
+=item B<metadata_update> insert I<repository_id> I<user> [I<eprint_id> I<eprint_id> ...]
+
+Items found by querying the DOI will be added to the EPrint. Existing fields will remain untouched.
+If a list of eprint_ids is given then the list is used. If no eprint_ids are specified the tool will search for all eprints with status "firstelectronic".
+
+=item B<metadata_update> overwrite I<repository_id> I<user> [I<eprint_id> I<eprint_id> ...]
+
+Items found by querying the DOI will be added to the EPrint regardless of the original state of the field.
+If a list of eprint_ids is given then the list is used. If no eprint_ids are specified the tool will search for all eprints with status "firstelectronic".
+
+=item B<metadata_update> compare I<repository_id> I<user> [I<eprint_id> I<eprint_id> ...]
+
+The current fields of the EPrint will be ouput along side the data obtained from querying the DOI. The EPrint is not altered.
+If a list of eprint_ids is given then the list is used. If no eprint_ids are specified the tool will search for all eprints with status "firstelectronic".
+
+=item B<metadata_update> help 
+
+print help information and exit
+
+=back
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--quiet>
+
+This option does not do anything.
+
+=item B<--verbose>
+
+Explain in detail what is going on. May be repeated for greater effect.
+
+=item B<--dryrun>
+
+Changes are not committed. If verbose is also specified the changes that would be made are displayed.
+
+=item B<--sendreport>
+
+A report of the changes is sent to the specified user.
+
+
+=back   
+
+=head1 AUTHOR
+
+This is part of this EPrints 3 system. 
+
+=head1 VERSION
+
+EPrints Version: eprints-3.2.4
+
+=cut
+
+use EPrints;
+use strict;
+
+use Getopt::Long;
+use Pod::Usage;
+
+my $dryrun = 0;
+my $sendreport = 0;
+my $verbose = 0;
+my $quiet = 0;
+my $help = 0;
+
+# UZH CHANGE ZORA-530 2016/11/08/jv - Change from http to https
+use LWP::Simple;
+use LWP::UserAgent;
+use XML::LibXML;
+my $PUB_MED_FETCH_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&retmode=xml&rettype=full';
+# UZH CHANGE ZORA-530 2016/11/08/jv END
+
+Getopt::Long::Configure("permute");
+
+GetOptions( 
+	'help|?' => \$help,
+	'verbose+' => \$verbose,
+	'dryrun' => \$dryrun,
+	'sendreport' => \$sendreport,
+	'quiet' => \$quiet,
+) || pod2usage( 2 );
+
+pod2usage( 1 ) if $help;
+pod2usage( 2 ) if( scalar @ARGV == 0 ); 
+
+
+our $noise = 0; #4;
+$noise = 0 if( $quiet );
+$noise = 1+$verbose if( $verbose );
+
+my $action = $ARGV[0];
+my $repoid = $ARGV[1];
+my $userid = $ARGV[2];
+my @ids = @ARGV[3..(scalar @ARGV)-1];
+
+pod2usage(1) unless defined $repoid;
+pod2usage(1) unless defined $action;
+pod2usage(1) unless defined $userid;
+pod2usage(1) unless ($action eq "insert" || $action eq "overwrite" || $action eq "compare");
+
+my $ep = EPrints->new();
+my $repo = $ep->repository( $repoid, noise=>$noise );
+if (!defined $repo)
+{
+	print STDERR "Failed to load repository: $repoid\n";
+	exit 1;
+}
+
+my $pid = $repo->config("plugins", "Import::DOI", "params", "pid");
+if (!defined $pid)
+{
+	print STDERR 'You need to configure your pid by setting the `pid\' variable in cfg.d/plugins.pl (see http://www.crossref.org/openurl): $c->{plugins}->{"Import::DOI"}->{params}->{pid} = "ourl_username:password";';
+	exit 1;
+}
+
+my $user_ds = $repo->dataset( "user" );
+
+my $userexp = EPrints::Search->new(
+		session => $repo,
+		dataset => $user_ds );
+my $report_user;
+my $report = "Metadata update report\n\n";
+my $email_report = $repo->make_doc_fragment;
+
+$userexp->add_field(
+		$user_ds->get_field( "username" ),
+		$userid );
+
+my $user_list = $userexp->perform_search;
+
+$user_list->map( sub {
+	my( $session, $dataset, $user ) = @_;
+	if (defined $user)
+	{
+		my $email_address = $user->get_value("email");
+		if (EPrints::Utils::is_set($email_address))
+		{
+			$report_user = $user;
+			return;
+		}
+	}
+});
+	
+$user_list->dispose;
+if (!EPrints::Utils::is_set($report_user) && $sendreport )
+{
+	print STDERR "sendreport specified but no email address found for user: $userid\n";
+	exit 1;
+}
+
+my $pubmed_plugin = $repo->plugin("Import::PubMedXML");
+my $doi_plugin =  $repo->plugin("Import::DOI");
+
+my $dataset = $repo->dataset("eprint");
+
+my $list = $dataset->search;
+my $count = $list->count;
+print "found [$count] eprints\n" if ($noise);
+
+my $eprint_list;
+
+if ( @ids )
+{
+	$eprint_list = $dataset->list( \@ids );
+}
+else
+{
+	my $searchexp = new EPrints::Search( 
+			satisfy_all => 1,
+			session=>$repo, 
+			dataset=>$dataset );
+
+	$searchexp->add_field( $dataset->get_field( "status" ), "firstelectronic" );
+
+	$eprint_list = $searchexp->perform_search;
+}
+
+$report .= "Considering [".$eprint_list->count."] eprints from a total of [$count]\n";
+
+$eprint_list->map( sub {
+	my( $session, $dataset, $eprint ) = @_;
+	my $eprintid = $eprint->get_id;
+	my $poss_doi = $eprint->get_value( "doi" );
+	my $pubmed_id = $eprint->get_value( "pubmedid" );
+	my $source = "Cross Ref";
+	return unless ( EPrints::Utils::is_set($poss_doi) || EPrints::Utils::is_set($pubmed_id) );
+
+	my $data;
+	if ( EPrints::Utils::is_set($poss_doi) )
+	{
+		$poss_doi =~ s/^\s+//;
+		$poss_doi =~ s/\s+$//;
+
+		print "found eprint id[$eprintid] DOI:[$poss_doi] \n" if ($noise);
+		return unless length($poss_doi);
+
+		if( $poss_doi =~ /^(doi:)?10\.\d\d\d\d\// ) 
+		{ 
+			$source = "Cross Ref";
+			# possible doi
+			if ( defined $doi_plugin ) 
+			{
+				# UZH CHANGE/ZORA-346 2014/08/05/mb
+				# $data = get_doi_data($poss_doi, $doi_plugin);
+				$data = get_doi_data($poss_doi, $doi_plugin, $eprintid);
+                        	unless (page_tags_correct($data))
+				{
+                                	print "Cross Ref DOI Data has invalid page range data\n" if ($noise);
+                                	$data = undef;
+				}
+			}
+			else
+			{
+				print "Cannot find suitable plugin to process DOI Data\n" if ($noise);
+			}
+		}
+	}
+
+	if ( !defined $data && EPrints::Utils::is_set($pubmed_id)  && $pubmed_id =~ /^[0-9]+$/ ) # Pub Med IDs are always an integer
+	{
+		print "found eprint id[$eprintid] PubMed ID:[$pubmed_id]\n" if ($noise);
+		$source = "Pub Med";
+		if ( defined $pubmed_plugin ) 
+		{
+			$data = get_pub_med_data($pubmed_id, $pubmed_plugin, $dataset );
+			# check for the inclusion of pagination data and reformat
+			# $data = format_pagination($data);
+		}
+		else
+		{
+			print "Cannot find suitable plugin to process Pub Med Data\n" if ($noise);
+		}
+	}
+
+	if (defined $data)
+	{
+		# check for the inclusion of pagination data and reformat
+		$data = format_pagination($data);
+
+		#normalise the creators section
+		if( defined $data->{creators_name} )
+		{
+			my @creators;
+			my $new_creators = $data->{creators_name};
+			foreach my $name (@{$new_creators})
+			{
+				my $creator_name = {};
+				$creator_name->{given} = $name->{given};
+				$creator_name->{family} = $name->{family};
+				push (@creators, { name => $creator_name }); 
+			}
+			$data->{creators} = \@creators if @creators;
+		}
+
+
+		if ($action eq "insert" || $action eq "overwrite" )
+		{
+			update_eprint($eprint, $action, $data);
+			if (!$dryrun)
+			{
+				$eprint->commit;
+			}
+			$report .= print_eprint($eprint, $data, $source, $action);
+			$email_report->appendChild(tabulate_eprint($repo, $eprint, $data, $source, $action));
+		}
+		elsif ($action eq "compare")
+		{
+			$report .= print_eprint($eprint, $data, $source, $action);
+			$email_report->appendChild(tabulate_eprint($repo, $eprint, $data, $source, $action));
+		}
+	}
+	else
+	{
+		print "No data retreieved for eprint $eprintid\n" if ($noise);
+		$report .= "No data retreieved for eprint $eprintid\n";
+	}
+});
+
+print $report if ($noise);
+send_report($repo, $email_report, $report_user, $noise) if ( $sendreport );
+
+print "finished updating eprints\n" if ($noise);
+$repo->terminate();
+
+sub get_pub_med_data
+{
+	my($pmid, $plugin, $dataset) = @_;
+   
+	my $data;
+	# Fetch metadata for individual PubMed ID 
+	my $url = URI->new( $PUB_MED_FETCH_URL );
+	$url->query_form( $url->query_form, id => $pmid );
+
+	# UZH CHANGE ZORA-530 2016/11/08/jv 
+	#my $xml = EPrints::XML::parse_url( $url ); 
+	
+	my $xml = fetch_pubmed_data( $url );
+ 
+	# UZH CHANGE ZORA-530 2016/11/08/jv END
+
+	my $root = $xml->documentElement;
+
+	if( $root->nodeName eq 'ERROR' )
+	{
+		EPrints::XML::dispose( $xml );
+		print "No match for: $pmid in Pub Med\n";
+		next;
+	}
+	ARTICLE: foreach my $article ($root->getElementsByTagName( "PubmedArticle" ))
+	{
+		my $xml_status = $article->getElementsByTagName( "PublicationStatus" )->item( 0 );
+		my $status = $plugin->xml_to_text( $xml_status ) if defined $xml_status;
+		if (defined $status && ( $status eq "epublish" || $status eq "ppublish" ) ) 
+		{
+			my $item = $plugin->xml_to_epdata( $dataset, $article );
+
+			if( defined $item )
+			{
+				$data = $item;
+				last ARTICLE;
+			}
+		}
+	}
+
+	EPrints::XML::dispose( $xml );
+
+	return $data;
+}
+
+sub get_doi_data
+{
+	# UZH CHANGE/ZORA-346 2014/08/05/mb
+	# my($doi, $plugin) = @_;
+	my($doi, $plugin, $eprintid) = @_;
+   
+	$doi =~ s/^(doi:)?/doi:/i;
+
+	my %params = (
+		pid => $pid,
+		noredirect => "true",
+		id => $doi,
+	);
+
+	my $url = URI->new( "http://www.crossref.org/openurl" );
+	$url->query_form( %params );
+
+	my $dom_doc;
+	eval {
+		$dom_doc = EPrints::XML::parse_url( $url );
+	};
+
+	my $dom_top = $dom_doc->getDocumentElement;
+
+	my $dom_query_result = ($dom_top->getElementsByTagName( "query_result" ))[0];
+
+        if( $@ || !defined $dom_query_result)
+        {
+		# UZH CHANGE/ZORA-346 2014/08/05/mb
+        	# print STDERR "warning invalid_doi: No or unrecognised response",
+                # return undef;
+		print STDERR "warning invalid_doi (eprint:",$eprintid,", ",$doi,
+		"): No or unrecognised response";
+                return undef;
+        }
+
+	my $dom_body = ($dom_query_result->getElementsByTagName( "body" ))[0];
+	my $dom_query = ($dom_body->getElementsByTagName( "query" ))[0];
+
+	my $status = $dom_query->getAttribute( "status" );
+
+	if( defined($status) && ($status eq "unresolved" || $status eq "malformed") )
+	{
+		# UZH CHANGE/ZORA-346 2014/08/05/mb
+		# print STDERR "warning invalid_doi: $msg\n";
+		# return undef;
+		print STDERR "warning invalid_doi (eprint:",$eprintid,", ",$doi,
+		"): $status\n";
+                return undef;
+	}
+
+	my $data = { doi => $doi };
+	foreach my $node ( $dom_query->getChildNodes )
+	{
+		next if( !EPrints::XML::is_dom( $node, "Element" ) );
+		my $name = $node->tagName;
+		if( $node->hasAttribute( "type" ) )
+		{
+			$name .= ".".$node->getAttribute( "type" );
+		}
+		if( $name eq "contributors" )
+		{
+			parse_contributor_data( $data, $node );
+		}
+		else
+		{
+			my $val = EPrints::Utils::tree_to_utf8( $node );
+			if ($name eq "year")
+			{
+				# check that this year is later than any previousy encountered year.
+				if (defined $data->{$name} )
+				{
+					if ($val > $data->{$name})
+					{
+						$data->{$name} = $val;
+					}
+				}
+				else
+				{
+					$data->{$name} = $val;
+				}
+			}
+			else
+			{
+				$data->{$name} = $val;
+			}
+		}
+	}
+
+	EPrints::XML::dispose( $dom_doc );
+
+	my $epdata = $plugin->convert_input( $data );
+	return $epdata;
+}
+
+sub print_eprint
+{
+	my($eprint, $data, $source, $action) = @_;
+
+	my $eprintid = $eprint->get_value("eprintid");
+	my $left_label = "Result";
+	if ($action eq "compare")
+	{
+		$left_label = "Current";
+	}
+	
+	my $report .= "################################################################################################################\n";
+	$report .= sprintf("%30s%31s %50s\n", "EPrint ID: $eprintid", $left_label, "Source: $source");
+
+	my $creators =  $eprint->get_value("creators");
+	my $creator_count = scalar @{$creators};
+
+	my $new_count = 0;
+	my $new_creators;
+
+	if( defined $data->{creators} )
+	{
+		$new_creators = $data->{creators};
+		$new_count = scalar @{$new_creators};
+	}
+
+	my $max_count = ( $creator_count > $new_count ) ? $creator_count : $new_count;
+	for (my $i=0; $i<$max_count; $i++)
+	{
+		my $o_name = "";
+		my $n_name = "";
+		if ($i < $creator_count)
+		{
+			$o_name = $creators->[$i]->{name}->{given};
+			$o_name .= " ".$creators->[$i]->{name}->{family};
+		}
+		if ($i < $new_count)
+		{
+			$n_name = $new_creators->[$i]->{name}->{given};
+			$n_name .= " ".$new_creators->[$i]->{name}->{family};
+		}
+		$report .= sprintf "%12s %48s %50s\n", "Creator:", $o_name, $n_name;
+	}
+
+	$report .= print_values("Type", $eprint->get_value("type"), "type", $data);
+	$report .= print_values("Title", $eprint->get_value("title"), "title", $data);
+	$report .= print_values("Abstract", $eprint->get_value("abstract"), "abstract", $data);
+	$report .= print_values("Date", $eprint->get_value("date"), "date", $data);
+	$report .= print_values("Book Title", $eprint->get_value("book_title"), "book_title", $data);
+	$report .= print_values("Publication", $eprint->get_value("publication"), "publication", $data);
+	$report .= print_values("Series", $eprint->get_value("series"), "series_title", $data);
+	$report .= print_values("ISSN", $eprint->get_value("issn"), "issn", $data);
+	
+	my $current_doi = $eprint->get_value("id_number");
+	$current_doi = "-" if (!defined $current_doi);
+	my $current_off_url = $eprint->get_value("id_number");
+	$current_off_url = "-" if (!defined $current_off_url);
+	my $new_doi = "-";
+	my $new_off_url = "-";
+
+	if( defined $data->{"doi"} )
+	{
+		$new_doi = $data->{"doi"};
+		$new_off_url = $data->{"doi"};
+		$new_off_url =~ s/^\s*doi:\s*//gi;
+		$new_off_url = "http://dx.doi.org/$new_off_url";
+	}
+	$report .= sprintf "%12s %48s %50s\n", "DOI:", $current_doi, $new_doi;
+	$report .= sprintf "%12s %48s %50s\n", "URL:", $current_off_url, $new_off_url;
+
+	$report .= print_values("ISBN", $eprint->get_value("isbn"), "isbn", $data);
+	$report .= print_values("Volume", $eprint->get_value("volume"), "volume", $data);
+	$report .= print_values("Number", $eprint->get_value("number"), "number", $data);
+	$report .= print_values("Page Range", $eprint->get_value("pagerange"), "pagerange", $data);
+
+	return $report;
+}
+
+sub print_values
+{
+	my( $title, $current_val, $doi_val, $data ) = @_;
+
+	$current_val = "-" if (!defined $current_val);
+	my $new_val = "-";
+
+	if( defined $data->{$doi_val} )
+	{
+		$new_val = $data->{$doi_val};
+	}
+	if (length $current_val > 45)
+	{
+		$current_val = (substr $current_val,0, 45)."...";
+	}	
+	if (length $new_val > 45)
+	{
+		$new_val = (substr $new_val,0, 45)."...";
+	}	
+	return sprintf "%12s %48s %50s\n", "$title:", $current_val, $new_val;
+}
+
+
+sub tabulate_eprint
+{
+	my($repo, $eprint, $data, $source, $action) = @_;
+
+	my $eprintid = $eprint->get_value("eprintid");
+	my $left_label = "Result";
+	if ($action eq "compare")
+	{
+		$left_label = "Current";
+	}
+	
+	my $table = $repo->make_element("table", cellpadding=>"0", cellspacing=>"0", border=>"1");
+	#my $table = $repo->make_element("table", border=>"1");
+	my $row = $repo->make_element("tr");
+	$table->appendChild($row);
+	my $td1 = $repo->make_element("td", colspan=>"2", width=>"50%");
+	my $td2 = $repo->make_element("td", colspan=>"1", width=>"50%");
+	$row->appendChild($td1);
+	$row->appendChild($td2);
+	$td1->appendChild($repo->make_text("EPrint ID: $eprintid:  $left_label "));
+	$td2->appendChild($repo->make_text("Source: $source"));
+
+	my $creators =  $eprint->get_value("creators");
+	my $creator_count = scalar @{$creators};
+
+	my $new_count = 0;
+	my $new_creators;
+
+	if( defined $data->{creators} )
+	{
+		$new_creators = $data->{creators};
+		$new_count = scalar @{$new_creators};
+	}
+
+	my $max_count = ( $creator_count > $new_count ) ? $creator_count : $new_count;
+	for (my $i=0; $i<$max_count; $i++)
+	{
+		my $o_name = "";
+		my $n_name = "";
+		if ($i < $creator_count)
+		{
+			$o_name = $creators->[$i]->{name}->{given};
+			$o_name .= " ".$creators->[$i]->{name}->{family};
+		}
+		if ($i < $new_count)
+		{
+			$n_name = $new_creators->[$i]->{name}->{given};
+			$n_name .= " ".$new_creators->[$i]->{name}->{family};
+		}
+		my $r = $repo->make_element("tr");
+		$table->appendChild($r);
+		my $td1 = $repo->make_element("td", colspan=>"1", width=>"10%");
+		my $td2 = $repo->make_element("td", colspan=>"1", width=>"40%");
+		my $td3 = $repo->make_element("td", colspan=>"1", width=>"50%");
+
+		$r->appendChild($td1);
+		$r->appendChild($td2);
+		$r->appendChild($td3);
+		$td1->appendChild($repo->make_text("Creator"));
+		$td2->appendChild($repo->make_text($o_name));
+		$td3->appendChild($repo->make_text($n_name));
+	}
+
+
+
+	$table->appendChild(tabulate_values($repo,"Title", $eprint->get_value("title"), "title", $data));
+	$table->appendChild(tabulate_values($repo,"Type", $eprint->get_value("type"), "type", $data));
+	$table->appendChild(tabulate_values($repo,"Abstract", $eprint->get_value("abstract"), "abstract", $data));
+	$table->appendChild(tabulate_values($repo,"Date", $eprint->get_value("date"), "date", $data));
+	$table->appendChild(tabulate_values($repo,"Book Title", $eprint->get_value("book_title"), "book_title", $data));
+	$table->appendChild(tabulate_values($repo,"Publication", $eprint->get_value("publication"), "publication", $data));
+	$table->appendChild(tabulate_values($repo,"ISSN", $eprint->get_value("issn"), "issn", $data));
+	
+	my $current_doi = $eprint->get_value("id_number");
+	$current_doi = "-" if (!defined $current_doi);
+	my $current_off_url = $eprint->get_value("id_number");
+	$current_off_url = "-" if (!defined $current_off_url);
+	my $new_doi = "-";
+	my $new_off_url = "-";
+
+	if( defined $data->{"doi"} )
+	{
+		$new_doi = $data->{"doi"};
+		$new_off_url = $data->{"doi"};
+		$new_off_url =~ s/^\s*doi:\s*//gi;
+		$new_off_url = "http://dx.doi.org/$new_off_url";
+	}
+	my $r1 = $repo->make_element("tr");
+	$table->appendChild($r1);
+	my $r1td1 = $repo->make_element("td", colspan=>"1", width=>"10%");
+	my $r1td2 = $repo->make_element("td", colspan=>"1", width=>"40%");
+	my $r1td3 = $repo->make_element("td", colspan=>"1", width=>"50%");
+
+	$r1->appendChild($r1td1);
+	$r1->appendChild($r1td2);
+	$r1->appendChild($r1td3);
+	$r1td1->appendChild($repo->make_text("DOI"));
+	$r1td2->appendChild($repo->make_text($current_doi));
+	$r1td3->appendChild($repo->make_text($new_doi));
+
+	my $r2 = $repo->make_element("tr");
+	$table->appendChild($r2);
+	my $r2td1 = $repo->make_element("td", colspan=>"1", width=>"10%");
+	my $r2td2 = $repo->make_element("td", colspan=>"1", width=>"40%");
+	my $r2td3 = $repo->make_element("td", colspan=>"1", width=>"50%");
+
+	$r2->appendChild($r2td1);
+	$r2->appendChild($r2td2);
+	$r2->appendChild($r2td3);
+	$r2td1->appendChild($repo->make_text("URL"));
+	$r2td2->appendChild($repo->make_text($current_off_url));
+	$r2td3->appendChild($repo->make_text($new_off_url));
+	
+	$table->appendChild(tabulate_values($repo,"ISBN", $eprint->get_value("isbn"), "isbn", $data));
+	$table->appendChild(tabulate_values($repo,"Volume", $eprint->get_value("volume"), "volume", $data));
+	$table->appendChild(tabulate_values($repo,"Number", $eprint->get_value("number"), "number", $data));
+	$table->appendChild(tabulate_values($repo,"Page Range", $eprint->get_value("pagerange"), "pagerange", $data));
+
+	return $table;
+}
+
+sub tabulate_values
+{
+	my( $repo, $title, $current_val, $doi_val, $data ) = @_;
+
+	$current_val = "-" if (!defined $current_val);
+	my $new_val = "-";
+
+	if( defined $data->{$doi_val} )
+	{
+		$new_val = $data->{$doi_val};
+	}
+	if (length $current_val > 45)
+	{
+		$current_val = (substr $current_val,0, 45)."...";
+	}	
+	if (length $new_val > 45)
+	{
+		$new_val = (substr $new_val,0, 45)."...";
+	}	
+        my $r = $repo->make_element("tr");
+
+        my $td1 = $repo->make_element("td", colspan=>"1", width=>"10%");
+        my $td2 = $repo->make_element("td", colspan=>"1", width=>"40%");
+        my $td3 = $repo->make_element("td", colspan=>"1", width=>"50%");
+        $r->appendChild($td1);
+        $r->appendChild($td2);
+        $r->appendChild($td3);
+        $td1->appendChild($repo->make_text($title));
+        $td2->appendChild($repo->make_text($current_val));
+        $td3->appendChild($repo->make_text($new_val));
+	return $r;
+}
+
+
+sub update_eprint
+{
+	my($eprint, $action, $data) = @_;
+
+	my $eprintid = $eprint->get_value("eprintid");
+
+	my $creators =  $eprint->get_value("creators");
+
+#	if( defined $data->{creators} )
+#	{
+#		my $new_creators = $data->{creators};
+#
+#		if ($action eq "overwrite")
+#		{
+#			$eprint->set_value("creators", $new_creators);
+#		}
+#		elsif ($action eq "insert")
+#		{
+#			foreach my $new_name (@{$new_creators})
+#			{
+#				my $seen = 0;
+#				NAME: foreach my $orig_name (@{$creators})
+#				{
+#			    		if ($new_name->{name}->{family} eq $orig_name->{name}->{family} )
+#					{
+#						$seen = 1;
+#						last NAME;
+#					}
+#				}	
+#				unless ($seen)
+#				{
+#					push (@{$creators}, $new_name);
+#				}
+#			}
+#			$eprint->set_value("creators", $creators);
+#		}
+#	}
+
+	if( defined $data->{date} )
+	{
+		my $current_val = $eprint->get_value("date");
+		my $new_val = $data->{date};
+		if (EPrints::Utils::is_set($new_val))
+		{
+			if ($action eq "overwrite")
+			{
+				if (EPrints::Utils::is_set($current_val) && length($current_val) >= 4 )
+				{
+					my $current_year = substr ($current_val, 0, 4);
+					if ($new_val > $current_year)
+					{
+						$eprint->set_value("date", $new_val);
+					}
+				}
+				else
+				{
+					$eprint->set_value("date", $new_val);
+				}
+			}
+			elsif ($action eq "insert")
+			{
+				unless (EPrints::Utils::is_set($current_val))
+				{
+					$eprint->set_value("date", $new_val);
+				}
+			}
+		}
+	}
+
+
+#	my @fields = qw( type title abstract date book_title publication issn isbn volume number pagerange );
+	my @fields = qw( volume number pagerange );
+	# do not need to update the id field as this contained the original DOI or Pub Med id
+	foreach my $field (@fields)
+	{
+		process_value($eprint, $field, $data, $action);
+	}
+}
+
+sub process_value
+{
+	my( $eprint, $field, $data, $action ) = @_;
+
+	if ($eprint->get_dataset->has_field($field))
+	{
+		my $current_val = $eprint->get_value($field);
+		my $new_val = $data->{$field};
+		if (EPrints::Utils::is_set($new_val))
+		{
+			if ($action eq "overwrite")
+			{
+				$eprint->set_value($field, $new_val);
+			}
+			elsif ($action eq "insert")
+			{
+				unless (EPrints::Utils::is_set($current_val))
+				{
+					$eprint->set_value($field, $new_val);
+				}
+			}
+			# we have made a change so update status to final
+			$eprint->set_value("status", "final");
+		}
+	}
+	else { print "attempt to use undefined field\n";}
+}
+
+sub parse_contributor_data
+{
+	my( $data, $node) = @_;
+
+	my @creators;
+
+	foreach my $contributor ($node->childNodes)
+	{
+		next unless EPrints::XML::is_dom( $contributor, "Element" );
+
+		my $creator_name = {};
+		foreach my $part ($contributor->childNodes)
+		{
+			if( $part->nodeName eq "given_name" )
+			{
+				$creator_name->{given} = EPrints::Utils::tree_to_utf8($part);
+			}
+			elsif( $part->nodeName eq "surname" )
+			{
+				$creator_name->{family} = EPrints::Utils::tree_to_utf8($part);
+			}
+		}
+		push @creators, { name => $creator_name }
+			if exists $creator_name->{family};
+	}
+
+	$data->{creators} = \@creators if @creators;
+}
+
+sub page_tags_correct
+{
+        my( $data ) = @_;
+        my $correct = 0;
+
+        my $orig_val = $data->{"pagerange"};
+	# UZH CHANGE ZORA-479 2016/03/12/mb
+        # if ( !defined $orig_val || $orig_val =~ /\d-\d/)
+        if ( !defined $orig_val || $orig_val =~ /\d-\d/ || $orig_val =~ /\D\d+?-\D\d+?/ )
+        {
+		# additionally check that either the volume or the number are set
+		if ( defined $data->{"volume"} || defined $data->{"number"} )
+		{
+                	$correct = 1;
+		}
+        }
+        return $correct;
+}
+
+sub format_pagination
+{
+	my( $data ) = @_;
+	my $orig_val = $data->{"pagerange"};
+
+	if ( defined $orig_val && $orig_val =~ /\d-\d/)
+	{
+		my ($startpage, $endpage) = split(/-/, $orig_val);
+                if ($endpage < $startpage)
+                {
+                	my $start_len = length ($startpage);
+                        my $end_len = length ($endpage);
+                        my $common = substr $startpage, 0, ($start_len - $end_len);
+                        my $start_units = substr $startpage, ($start_len - $end_len), $end_len;
+                        $common++ if ($start_units > $endpage);
+                        $endpage = join("", $common, $endpage);
+              		my $range = join "-", $startpage, $endpage;
+			$data->{"pagerange"} = $range;
+		}
+	}
+	return $data;
+}
+
+sub send_report
+{
+	my ($repo, $report, $user, $noise) = @_;
+
+	my $email_address = $user->get_value("email");
+	print "Sending report to: $email_address\n" if ($noise);
+	my $mail = $repo->html_phrase( "metadata_update_mail",
+				report => $report );
+	my $result = $user->mail( "metadata_update_mail_subject", $mail );
+	if ($result)
+	{
+		print "email sent to: $email_address\n" if ($noise);
+	}
+	else
+	{
+		print STDERR "Unable to send email sent to: $email_address\n";
+	}
+	EPrints::XML::dispose( $mail );
+}
+
+# UZH CHANGE ZORA-530 2016/11/08/jv 
+sub fetch_pubmed_data
+{
+	my ( $url ) = @_;
+
+        my $xml;
+        my $response;
+
+        my $parser = XML::LibXML->new();
+        $parser->validation(0);
+
+        my $request_retry = 3;
+        my $request_delay = 10;
+
+        my $req = HTTP::Request->new("GET",$url);
+        $req->header( "Accept" => "text/xml" );
+        $req->header( "Accept-Charset" => "utf-8" );
+        $req->header( "User-Agent" => "EPrints 3.3.x; www.zora.uzh.ch" );
+
+        my $request_counter = 1;
+        my $success = 0;
+
+        while (!$success && $request_counter <= $request_retry)
+        {
+                my $ua = LWP::UserAgent->new;
+                $ua->env_proxy;
+                $ua->timeout(60);
+                $response = $ua->request($req);
+                $success = $response->is_success;
+                $request_counter++;
+                sleep $request_delay if !$success;
+        }
+
+        if ( $response->code != 200 )
+        {
+                print STDERR "No response from $PUB_MED_FETCH_URL for PubMed Metadata Update \n";
+        }
+
+	if (!$success)
+        {
+                $xml = $parser->parse_string( '<?xml version="1.0" ?><eFetchResult><ERROR>' . $response->code . '</ERROR></eFetchResult>' );
+        }
+        else
+        {
+                $xml = $parser->parse_string( $response->content );
+        }
+
+        return $xml;
+}
+# UZH CHANGE ZORA-530 2016/11/08/jv END
+
+1;
+
